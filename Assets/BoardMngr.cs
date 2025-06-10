@@ -7,6 +7,10 @@ using UnityEditor;           // for EditorUtility.OpenFilePanel
 #endif
 using System.IO;
 using UnityEngine.SceneManagement;
+using TMPro;
+using System.Collections;
+using System.Diagnostics;
+
 
 public class BoardManager : MonoBehaviour
 {
@@ -26,6 +30,55 @@ public class BoardManager : MonoBehaviour
 
     [Header("Win UI")]
     public GameObject winPanel;
+    public TextMeshProUGUI winMessageText;
+
+    [Header("Move counter")]
+    public TextMeshProUGUI moveCounterText;
+    private int moveCount = 0;
+
+    [Header("Auto-Solve")]
+    public Button autoSolveButton;
+    public float autoSolveDelay = 0.5f;
+
+    class Node
+    {
+        public int[] state;      // length 9, row-major: 0..8
+        public int g;          // cost so far
+        public int h;          // heuristic
+        public Node parent;     // to reconstruct path
+        public int movedTile;  // the tile number we moved to get here (for replay)
+        public int f => g + h;
+    }
+
+    List<int> solutionMoves = null;
+
+    int Heuristic(int[] state)
+    {
+        int dist = 0;
+        for (int i = 0; i < 9; i++)
+        {
+            int val = state[i];
+            if (val == 0) continue;
+            int targetIndex = val - 1;
+            int r1 = i / 3, c1 = i % 3;
+            int r2 = targetIndex / 3, c2 = targetIndex % 3;
+            dist += Mathf.Abs(r1 - r2) + Mathf.Abs(c1 - c2);
+        }
+        return dist;
+    }
+
+    [Header("BFS-Solve")]
+    public Button bfsSolveButton;
+    public float bfsSolveDelay = 0.5f;
+
+    // you can reuse the same Node class (without h):
+    class BFNode
+    {
+        public int[] state;      // 9-length, row-major
+        public BFNode parent;
+        public int movedTile;  // which tile moved into zero
+    }
+
 
     int[,] initial = {
         { 1, 2, 3 },
@@ -46,6 +99,8 @@ public class BoardManager : MonoBehaviour
             if (imgBtn != null)
                 imgBtn.onClick.AddListener(HideOriginal);
         }
+        moveCount = 0;
+        UpdateMoveCounter();
     }
 
     void SpawnTiles()
@@ -66,6 +121,9 @@ public class BoardManager : MonoBehaviour
         if (empty != null && IsAdjacent(t, empty))
             Swap(t, empty);
             CheckWin();
+
+        moveCount++;
+        UpdateMoveCounter();
     }
 
     Tile GetEmptyTile()
@@ -146,6 +204,7 @@ public class BoardManager : MonoBehaviour
             CreateFullSprite(tex);      // create a sprite of the entire image
             SliceAndApply(tex);         // slice into the 3×3 tiles
         }
+        Shuffle();
 #else
         // In a standalone build, use a plugin like
         // https://github.com/gkngkc/UnityStandaloneFileBrowser
@@ -271,7 +330,9 @@ public class BoardManager : MonoBehaviour
     {
         if (IsSolved())
         {
-            // show your panel
+            if (winMessageText != null)
+                winMessageText.text = $"You solved it in {moveCount} moves! ";
+
             if (winPanel != null)
                 winPanel.SetActive(true);
         }
@@ -279,20 +340,253 @@ public class BoardManager : MonoBehaviour
 
     public void RestartGame()
     {
-        // hide the win panel
-        winPanel.SetActive(false);
+        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+    }
 
-        // put tiles back into solved order in both grid[] and UI
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 3; c++)
+    void UpdateMoveCounter()
+    {
+        moveCounterText.text = $"Moves: {moveCount}";
+    }
+
+    // Given a 1-D state array, return all legal neighbor nodes
+    IEnumerable<Node> GetNeighbors(Node n)
+    {
+        int zeroPos = System.Array.IndexOf(n.state, 0);
+        int zr = zeroPos / 3, zc = zeroPos % 3;
+        int[] dr = { -1, +1, 0, 0 };
+        int[] dc = { 0, 0, -1, +1 };
+        for (int i = 0; i < 4; i++)
+        {
+            int nr = zr + dr[i], nc = zc + dc[i];
+            if (nr < 0 || nr > 2 || nc < 0 || nc > 2) continue;
+            int swapPos = nr * 3 + nc;
+            // create new state
+            int[] newState = (int[])n.state.Clone();
+            // swap 0 and the neighbor
+            newState[zeroPos] = newState[swapPos];
+            newState[swapPos] = 0;
+            var child = new Node
             {
-                Tile t = grid[r, c];
-                // the instance whose number == (r*3 + c + 1)%9 is already in place,
-                // so you could either re-SpawnTiles() or swap until solved.
-                // Simplest: reload scene. Otherwise you'd need a ResetBoard() helper.
+                state = newState,
+                g = n.g + 1,
+                h = 0,             // fill below
+                parent = n,
+                movedTile = newState[zeroPos]  // that moved into the blank
+            };
+            child.h = Heuristic(child.state);
+            yield return child;
+        }
+    }
+
+    List<int> SolvePuzzleAStar(int[] startState)
+    {
+        var openSet = new List<Node>();
+        var closedSet = new HashSet<string>();
+        var start = new Node
+        {
+            state = startState,
+            g = 0,
+            h = Heuristic(startState),
+            parent = null,
+            movedTile = -1
+        };
+        openSet.Add(start);
+
+        while (openSet.Count > 0)
+        {
+            // pick node with lowest f
+            openSet.Sort((a, b) => a.f.CompareTo(b.f));
+            var current = openSet[0];
+            openSet.RemoveAt(0);
+
+            string key = string.Join(",", current.state);
+            if (closedSet.Contains(key))
+                continue;
+
+            // goal?
+            if (current.h == 0)
+            {
+                // reconstruct move list
+                var moves = new List<int>();
+                var n = current;
+                while (n.parent != null)
+                {
+                    moves.Add(n.movedTile);
+                    n = n.parent;
+                }
+                moves.Reverse();
+                return moves;
             }
 
-        // then shuffle
-        ShuffleBoard(100);
+            closedSet.Add(key);
+
+            foreach (var neighbor in GetNeighbors(current))
+            {
+                string nk = string.Join(",", neighbor.state);
+                if (closedSet.Contains(nk)) continue;
+                openSet.Add(neighbor);
+            }
+        }
+
+        return null; // unsolvable?
+    }
+
+    public void OnAutoSolvePressedAStart()
+    {
+        // read current board into a flat array
+        int[] flat = new int[9];
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                flat[r * 3 + c] = grid[r, c].number;
+
+        solutionMoves = SolvePuzzleAStar(flat);
+        if (solutionMoves != null && solutionMoves.Count > 0)
+        {
+            StartCoroutine(AnimateSolution());
+        }
+        else
+        {
+            UnityEngine.Debug.LogWarning("No solution found!");
+        }
+    }
+
+    // step through the solution
+    IEnumerator AnimateSolution()
+    {
+        // disable player input while auto-solving
+        autoSolveButton.interactable = false;
+        Button[] allBtns = boardParent.GetComponentsInChildren<Button>();
+        foreach (var b in allBtns) b.interactable = false;
+
+        foreach (int tileNum in solutionMoves)
+        {
+            // find the Tile instance with that number
+            Tile t = grid.Cast<Tile>().First(x => x.number == tileNum);
+            TryMove(t);
+            yield return new WaitForSeconds(autoSolveDelay);
+        }
+
+        // re-enable input
+        autoSolveButton.interactable = true;
+        foreach (var b in allBtns) b.interactable = true;
+    }
+
+    List<int> SolvePuzzleBFS(int[] startState)
+    {
+        var visited = new HashSet<string>();
+        var q = new Queue<BFNode>();
+
+        var root = new BFNode { state = startState, parent = null, movedTile = -1 };
+        q.Enqueue(root);
+        visited.Add(StateKey(startState));
+
+        while (q.Count > 0)
+        {
+            var n = q.Dequeue();
+
+            // goal test: blank in last spot and everything else in order
+            if (IsGoal(n.state))
+            {
+                // reconstruct moves
+                var moves = new List<int>();
+                for (var cur = n; cur.parent != null; cur = cur.parent)
+                    moves.Add(cur.movedTile);
+                moves.Reverse();
+                return moves;
+            }
+
+            // expand neighbors
+            foreach (var child in GetBFSNeighbors(n))
+            {
+                string key = StateKey(child.state);
+                if (visited.Add(key))
+                    q.Enqueue(child);
+            }
+        }
+
+        return null;
+    }
+
+    IEnumerable<BFNode> GetBFSNeighbors(BFNode n)
+    {
+        int zeroPos = System.Array.IndexOf(n.state, 0);
+        int zr = zeroPos / 3, zc = zeroPos % 3;
+        int[] dr = { -1, +1, 0, 0 };
+        int[] dc = { 0, 0, -1, +1 };
+
+        for (int i = 0; i < 4; i++)
+        {
+            int nr = zr + dr[i], nc = zc + dc[i];
+            if (nr < 0 || nr > 2 || nc < 0 || nc > 2) continue;
+
+            int swapPos = nr * 3 + nc;
+            int[] newState = (int[])n.state.Clone();
+            // swap
+            newState[zeroPos] = newState[swapPos];
+            newState[swapPos] = 0;
+
+            yield return new BFNode
+            {
+                state = newState,
+                parent = n,
+                movedTile = newState[zeroPos]
+            };
+        }
+    }
+
+    bool IsGoal(int[] state)
+    {
+        for (int i = 0; i < 8; i++)
+            if (state[i] != i + 1) return false;
+        return state[8] == 0;
+    }
+
+    string StateKey(int[] state) => string.Join(",", state);
+
+    public void OnBFSSolvePressed()
+    {
+        // read current grid into flat array
+        int[] flat = new int[9];
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                flat[r * 3 + c] = grid[r, c].number;
+
+        // time the BFS
+        var sw = Stopwatch.StartNew();
+        var bfsMoves = SolvePuzzleBFS(flat);
+        sw.Stop();
+        UnityEngine.Debug.Log($"BFS found {bfsMoves?.Count ?? 0} moves in {sw.ElapsedMilliseconds} ms");
+
+        if (bfsMoves != null)
+        {
+            StartCoroutine(AnimateSolution(bfsMoves, bfsSolveDelay, bfsSolveButton));
+        }
+        else
+        {
+            UnityEngine.Debug.LogWarning("BFS: No solution found!");
+        }
+    }
+
+    // reuse your AnimateSolution but parameterize the move list and button
+    IEnumerator AnimateSolution(List<int> moves, float delay, Button disableButton)
+    {
+        // disable both solve buttons and tile input
+        autoSolveButton.interactable = false;
+        bfsSolveButton.interactable = false;
+        foreach (var b in boardParent.GetComponentsInChildren<Button>())
+            b.interactable = false;
+
+        foreach (int tileNum in moves)
+        {
+            var tile = grid.Cast<Tile>().First(x => x.number == tileNum);
+            TryMove(tile);
+            yield return new WaitForSeconds(delay);
+        }
+
+        // re-enable
+        autoSolveButton.interactable = true;
+        bfsSolveButton.interactable = true;
+        foreach (var b in boardParent.GetComponentsInChildren<Button>())
+            b.interactable = true;
     }
 }
