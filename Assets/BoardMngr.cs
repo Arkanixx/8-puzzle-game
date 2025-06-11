@@ -10,6 +10,8 @@ using UnityEngine.SceneManagement;
 using TMPro;
 using System.Collections;
 using System.Diagnostics;
+using SFB;             
+using UnityEngine.Networking;
 
 
 public class BoardManager : MonoBehaviour
@@ -20,13 +22,13 @@ public class BoardManager : MonoBehaviour
     private Tile[,] grid = new Tile[3, 3];
 
     [Header("Picture Puzzle")]
-    public Button loadImageButton;              // hook this to your “Load Image” button
-    public Button viewOriginalButton;           // hook this to your “View Original” button
-    public GameObject originalImagePanel;       // the panel (initially inactive) that holds the Image
-    public Image originalImageDisplay;          // the Image component that shows the full sprite
+    public Button loadImageButton;              
+    public Button viewOriginalButton;           
+    public GameObject originalImagePanel;      
+    public Image originalImageDisplay;          
 
-    private Texture2D lastLoadedTexture;        // remember the raw texture
-    private Sprite fullImageSprite;          // the sprite we’ll assign for “View Original”
+    private Texture2D lastLoadedTexture;       
+    private Sprite fullImageSprite;         
 
     [Header("Win UI")]
     public GameObject winPanel;
@@ -39,6 +41,9 @@ public class BoardManager : MonoBehaviour
     [Header("Auto-Solve")]
     public Button autoSolveButton;
     public float autoSolveDelay = 0.5f;
+
+    [Header("UI Buttons")]
+    public Button exitButton;  
 
     class Node
     {
@@ -101,6 +106,20 @@ public class BoardManager : MonoBehaviour
         }
         moveCount = 0;
         UpdateMoveCounter();
+
+        if (exitButton != null)
+            exitButton.onClick.AddListener(OnExitPressed);
+    }
+
+    void OnExitPressed()
+    {
+#if UNITY_EDITOR
+            // stops playmode in the Editor
+            EditorApplication.isPlaying = false;
+#else
+        // quits the standalone build
+        Application.Quit();
+#endif
     }
 
     void SpawnTiles()
@@ -188,28 +207,64 @@ public class BoardManager : MonoBehaviour
 
     public void LoadImage()
     {
-#if UNITY_EDITOR
-        string path = EditorUtility.OpenFilePanel(
-            "Select a picture",
-            "",
-            "png,jpg,jpeg"
-        );
-        if (string.IsNullOrEmpty(path)) return;
+        string path = null;
 
-        byte[] fileBytes = File.ReadAllBytes(path);
-        Texture2D tex = new Texture2D(2, 2);
-        if (tex.LoadImage(fileBytes))
-        {
-            lastLoadedTexture = tex;
-            CreateFullSprite(tex);      // create a sprite of the entire image
-            SliceAndApply(tex);         // slice into the 3×3 tiles
-        }
-        Shuffle();
+#if UNITY_EDITOR
+    path = EditorUtility.OpenFilePanel("Select a picture", "", "png,jpg,jpeg");
 #else
-        // In a standalone build, use a plugin like
-        // https://github.com/gkngkc/UnityStandaloneFileBrowser
+        var filters = new[] {
+        new ExtensionFilter("Image Files", "png", "jpg", "jpeg")
+    };
+        var paths = StandaloneFileBrowser.OpenFilePanel(
+            "Select a picture",
+            "",      // start in last folder
+            filters, // use the ExtensionFilter array
+            false    // single-select
+        );
+        if (paths != null && paths.Length > 0)
+            path = paths[0];
 #endif
+
+        if (string.IsNullOrEmpty(path)) return;
+        StartCoroutine(LoadAndSliceImage(path));
     }
+
+
+    /// <summary>
+    /// Loads the image from disk (or URL), converts to Texture2D,
+    /// creates the full-image sprite, slices into the 3×3 tiles, and shuffles.
+    /// </summary>
+    private IEnumerator LoadAndSliceImage(string filePath)
+    {
+        // On some platforms you need the file:// prefix
+        string url = "file:///" + filePath;
+
+        // Download it (works for both local files and web URLs)
+        using (var uwr = UnityWebRequestTexture.GetTexture(url))
+        {
+            yield return uwr.SendWebRequest();
+
+            if (uwr.result != UnityWebRequest.Result.Success)
+            {
+                UnityEngine.Debug.LogError($"Error loading image: {uwr.error}");
+                yield break;
+            }
+
+            // 3) Got the texture!
+            Texture2D tex = DownloadHandlerTexture.GetContent(uwr);
+            lastLoadedTexture = tex;
+
+            // 4) Build the full-image sprite and assign to your "View Original"
+            CreateFullSprite(tex);
+
+            // 5) Slice it up and apply to your Tile grid
+            SliceAndApply(tex);
+
+            // 6) Shuffle
+            Shuffle();
+        }
+    }
+
 
     /// <summary>
     /// Make a Sprite out of the full Texture2D and store it.
